@@ -1,0 +1,15 @@
+{
+  "name": "dev-prompt",
+  "version": "0.1.0",
+  "description": "Cross-framework reverse proxy overlay for clicking any element on desktop or mobile browsers and saving structured AI coding prompts.",
+  "type": "module",
+  "bin": {
+    "dev-prompt": "./bin/dev-prompt.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
