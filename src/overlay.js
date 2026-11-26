@@ -5,6 +5,7 @@
   }
 
   const apiBase = scriptEl.dataset.apiBase || "/__dev-prompt__/items/";
+  const rootBase = apiBase.replace(/items\/?$/, "");
 
   const host = document.createElement("div");
   host.id = "dev-prompt-host";
@@ -55,6 +56,10 @@
       }
       .dp-btn-primary {
         background: #2563eb;
+        color: #ffffff;
+      }
+      .dp-btn-success {
+        background: #15803d;
         color: #ffffff;
       }
       .dp-btn-secondary {
@@ -151,7 +156,7 @@
       }
       .dp-sheet, .dp-drawer {
         width: min(100%, 34rem);
-        max-height: 82dvh;
+        max-height: 85dvh;
         overflow-y: auto;
         border-radius: 1.1rem;
         background: #ffffff;
@@ -172,6 +177,7 @@
         display: flex;
         align-items: center;
         gap: 0.4rem;
+        flex-wrap: wrap;
       }
       .dp-title {
         margin: 0;
@@ -218,6 +224,35 @@
         margin: 0;
         color: #b91c1c;
         font-size: 0.95rem;
+      }
+      .dp-status-card {
+        padding: 0.75rem;
+        border-radius: 0.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+        font-size: 0.95rem;
+      }
+      .dp-status-running {
+        background: #eff6ff;
+        border: 1px solid #93c5fd;
+        color: #1e3a8a;
+      }
+      .dp-status-done {
+        background: #f0fdf4;
+        border: 1px solid #86efac;
+        color: #14532d;
+      }
+      .dp-status-error {
+        background: #fef2f2;
+        border: 1px solid #fca5a5;
+        color: #991b1b;
+      }
+      .dp-status-summary {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 0.9rem;
       }
       .dp-list {
         display: flex;
@@ -313,7 +348,10 @@
         <p class="dp-error" data-sheet-error hidden></p>
         <div class="dp-row">
           <button type="button" class="dp-btn dp-btn-surface" data-action="close-sheet">取消</button>
-          <button type="button" class="dp-btn dp-btn-primary" data-action="submit-prompt">送出標註</button>
+          <div class="dp-actions">
+            <button type="button" class="dp-btn dp-btn-surface" data-action="save-only">先存清單</button>
+            <button type="button" class="dp-btn dp-btn-primary" data-action="save-and-send">直接送給 Agent</button>
+          </div>
         </div>
       </div>
     </div>
@@ -324,9 +362,13 @@
           <h2 class="dp-title">修改標註清單</h2>
           <button type="button" class="dp-btn dp-btn-surface" data-action="close-drawer">關閉</button>
         </div>
+        <div class="dp-status-card" data-status-card hidden></div>
         <div class="dp-row">
-          <button type="button" class="dp-btn dp-btn-surface" data-action="copy-markdown">複製待處理</button>
-          <button type="button" class="dp-btn dp-btn-danger" data-action="clear-all">清空全部</button>
+          <button type="button" class="dp-btn dp-btn-primary" data-action="dispatch-all">整理並送給 Agent</button>
+          <div class="dp-actions">
+            <button type="button" class="dp-btn dp-btn-surface" data-action="copy-prompt">複製 Prompt</button>
+            <button type="button" class="dp-btn dp-btn-danger" data-action="clear-all">清空</button>
+          </div>
         </div>
         <div class="dp-list" data-list></div>
       </div>
@@ -348,7 +390,10 @@
   const targetSelectorEl = shadow.querySelector("[data-target-selector]");
   const promptInput = shadow.querySelector("[data-prompt-input]");
   const sheetError = shadow.querySelector("[data-sheet-error]");
-  const submitBtn = shadow.querySelector('[data-action="submit-prompt"]');
+  const saveOnlyBtn = shadow.querySelector('[data-action="save-only"]');
+  const saveSendBtn = shadow.querySelector('[data-action="save-and-send"]');
+  const dispatchAllBtn = shadow.querySelector('[data-action="dispatch-all"]');
+  const statusCard = shadow.querySelector("[data-status-card]");
   const parentBtn = shadow.querySelector('[data-action="select-parent"]');
   const countEl = shadow.querySelector("[data-count]");
   const listEl = shadow.querySelector("[data-list]");
@@ -357,7 +402,9 @@
   let picking = false;
   let selectedEl = null;
   let items = [];
+  let dispatchInfo = { job: { status: "idle" }, dispatch_mode: "auto", has_waiter: false };
   let toastTimer = null;
+  let pollTimer = null;
 
   function showToast(message) {
     toastEl.textContent = message;
@@ -365,7 +412,7 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       toastEl.hidden = true;
-    }, 2800);
+    }, 3200);
   }
 
   function escapeIdent(value) {
@@ -532,6 +579,86 @@
     document.removeEventListener("keydown", onKeyDown, true);
   }
 
+  function updateCount() {
+    const openCount = items.filter((item) => item.status !== "done").length;
+    const isRunning = dispatchInfo.job && dispatchInfo.job.status === "running";
+    countEl.textContent = isRunning ? "改中" : String(openCount);
+    minPill.textContent = isRunning ? "…" : openCount > 0 ? String(openCount) : "標";
+    dispatchAllBtn.disabled = isRunning || openCount === 0;
+    dispatchAllBtn.textContent = isRunning
+      ? "Agent 修改中…"
+      : `整理並送給 Agent${openCount > 0 ? ` (${openCount})` : ""}`;
+  }
+
+  function renderStatusCard() {
+    const job = dispatchInfo.job;
+    if (!job || job.status === "idle") {
+      statusCard.hidden = true;
+      return;
+    }
+    statusCard.hidden = false;
+    statusCard.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "dp-row";
+    const title = document.createElement("strong");
+
+    if (job.status === "running") {
+      statusCard.className = "dp-status-card dp-status-running";
+      title.textContent = `Agent（${job.mode}）正在修改中…`;
+      header.append(title);
+      statusCard.append(header);
+      return;
+    }
+
+    if (job.status === "done" || job.status === "handed_off") {
+      statusCard.className = "dp-status-card dp-status-done";
+      title.textContent =
+        job.status === "handed_off" ? "已整理並送給 Agent！" : "Agent 已修改完成！";
+      const reloadBtn = document.createElement("button");
+      reloadBtn.type = "button";
+      reloadBtn.className = "dp-btn dp-btn-success";
+      reloadBtn.textContent = "重新整理看結果";
+      reloadBtn.addEventListener("click", () => window.location.reload());
+      header.append(title, reloadBtn);
+      statusCard.append(header);
+      if (job.summary) {
+        const p = document.createElement("p");
+        p.className = "dp-status-summary";
+        p.textContent = job.summary;
+        statusCard.append(p);
+      }
+      return;
+    }
+
+    statusCard.className = "dp-status-card dp-status-error";
+    title.textContent = "送給 Agent 失敗";
+    header.append(title);
+    statusCard.append(header);
+    if (job.error) {
+      const p = document.createElement("p");
+      p.className = "dp-status-summary";
+      p.textContent = job.error;
+      statusCard.append(p);
+    }
+  }
+
+  function schedulePollIfRunning() {
+    clearTimeout(pollTimer);
+    if (dispatchInfo.job && dispatchInfo.job.status === "running") {
+      pollTimer = setTimeout(async () => {
+        const prevStatus = dispatchInfo.job.status;
+        await fetchItems();
+        if (prevStatus === "running" && dispatchInfo.job.status === "done") {
+          showToast("Agent 已改好！點開清單或直接重新整理看結果");
+        } else if (prevStatus === "running" && dispatchInfo.job.status === "error") {
+          showToast("Agent 執行失敗，請打開清單查看原因");
+        }
+        schedulePollIfRunning();
+      }, 1500);
+    }
+  }
+
   async function fetchItems() {
     try {
       const res = await fetch(apiBase, { credentials: "same-origin" });
@@ -540,22 +667,53 @@
       }
       const data = await res.json();
       items = Array.isArray(data.items) ? data.items : [];
+      if (data.job) {
+        dispatchInfo = {
+          job: data.job,
+          dispatch_mode: data.dispatch_mode,
+          has_waiter: Boolean(data.has_waiter),
+        };
+      }
       updateCount();
+      renderStatusCard();
       if (!drawerWrap.hidden) {
         renderDrawer();
       }
     } catch {
-      // Quietly retry on next drawer open if proxy restarted.
+      // Quietly retry on next action if proxy restarted.
     }
   }
 
-  function updateCount() {
-    const openCount = items.filter((item) => item.status !== "done").length;
-    countEl.textContent = String(openCount);
-    minPill.textContent = openCount > 0 ? String(openCount) : "標";
+  async function dispatchToAgent(itemIds = null) {
+    try {
+      const res = await fetch(`${rootBase}dispatch/`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(itemIds ? { item_ids: itemIds } : {}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || "送給 Agent 失敗");
+        return false;
+      }
+      dispatchInfo.job = data.job;
+      updateCount();
+      renderStatusCard();
+      schedulePollIfRunning();
+      if (data.job.status === "handed_off") {
+        showToast("已整理成 Prompt 並送給 Agent！");
+      } else {
+        showToast("已整理成 Prompt，Agent 開始修改中…");
+      }
+      return true;
+    } catch {
+      showToast("連不到 dev-prompt 代理伺服器");
+      return false;
+    }
   }
 
-  async function submitPrompt() {
+  async function submitPrompt(sendImmediately) {
     const prompt = promptInput.value.trim();
     if (!prompt) {
       sheetError.textContent = "請先輸入想修改的內容";
@@ -566,7 +724,8 @@
     if (!selectedEl) {
       return;
     }
-    submitBtn.disabled = true;
+    saveOnlyBtn.disabled = true;
+    saveSendBtn.disabled = true;
     sheetError.hidden = true;
     const info = describeElement(selectedEl);
     const rect = selectedEl.getBoundingClientRect();
@@ -602,12 +761,21 @@
       items.push(data.item);
       updateCount();
       closeSheet();
-      showToast("已記下標註！回對話說「處理標註」就會改好");
+      if (sendImmediately) {
+        const ok = await dispatchToAgent([data.item.id]);
+        if (!ok) {
+          drawerWrap.hidden = false;
+          renderDrawer();
+        }
+      } else {
+        showToast("已存進清單！逛完再點「清單 → 整理並送給 Agent」");
+      }
     } catch {
       sheetError.textContent = "連不到 dev-prompt 代理伺服器";
       sheetError.hidden = false;
     } finally {
-      submitBtn.disabled = false;
+      saveOnlyBtn.disabled = false;
+      saveSendBtn.disabled = false;
     }
   }
 
@@ -664,36 +832,22 @@
     }
   }
 
-  function formatMarkdown(list) {
-    return list
-      .map((item, idx) => {
-        const device = item.device === "mobile" ? "手機" : "電腦";
-        const width =
-          item.viewport && item.viewport.width
-            ? `${item.viewport.width}×${item.viewport.height}`
-            : "";
-        return [
-          `${idx + 1}. **${item.url || "/"}**（${device}${width ? ` ${width}` : ""}）`,
-          `   - 元件：\`${item.selector || `<${item.tag}>`}\` ${item.text ? `「${item.text}」` : ""}`.trimEnd(),
-          `   - 需求：${item.prompt}`,
-        ].join("\n");
-      })
-      .join("\n\n");
-  }
-
-  async function copyPendingMarkdown() {
-    const openItems = items.filter((item) => item.status !== "done");
-    if (!openItems.length) {
-      showToast("目前沒有待處理的標註");
-      return;
-    }
-    const text = formatMarkdown(openItems);
+  async function copyOrganizedPrompt() {
     try {
+      const res = await fetch(`${rootBase}prompt-preview/`, { credentials: "same-origin" });
+      if (!res.ok) {
+        return;
+      }
+      const data = await res.json();
+      if (!data.prompt) {
+        showToast("目前沒有待處理的標註");
+        return;
+      }
       if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(data.prompt);
       } else {
         const area = document.createElement("textarea");
-        area.value = text;
+        area.value = data.prompt;
         area.style.position = "fixed";
         area.style.opacity = "0";
         document.body.appendChild(area);
@@ -701,13 +855,14 @@
         document.execCommand("copy");
         area.remove();
       }
-      showToast(`已複製 ${openItems.length} 筆待處理標註`);
+      showToast(`已複製整理好的完整 Prompt（${data.open_count} 筆）`);
     } catch {
-      showToast("瀏覽器不允許複製，直接回對話說「處理標註」即可");
+      showToast("複製失敗，請確認代理伺服器仍在執行");
     }
   }
 
   function renderDrawer() {
+    renderStatusCard();
     listEl.innerHTML = "";
     if (!items.length) {
       const empty = document.createElement("p");
@@ -801,10 +956,14 @@
       }
     } else if (action === "close-sheet") {
       closeSheet();
-    } else if (action === "submit-prompt") {
-      submitPrompt();
-    } else if (action === "copy-markdown") {
-      copyPendingMarkdown();
+    } else if (action === "save-only") {
+      submitPrompt(false);
+    } else if (action === "save-and-send") {
+      submitPrompt(true);
+    } else if (action === "dispatch-all") {
+      dispatchToAgent(null);
+    } else if (action === "copy-prompt") {
+      copyOrganizedPrompt();
     } else if (action === "clear-all") {
       clearAll();
     }
@@ -825,9 +984,9 @@
   promptInput.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
-      submitPrompt();
+      submitPrompt(true);
     }
   });
 
-  fetchItems();
+  fetchItems().then(schedulePollIfRunning);
 })();

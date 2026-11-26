@@ -1,30 +1,40 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveAgentMode } from "../src/dispatcher.mjs";
+import { buildAgentPrompt } from "../src/prompt-builder.mjs";
 import { createProxyServer } from "../src/proxy.mjs";
 import { PromptStore, formatMarkdown } from "../src/store.mjs";
 
 function printHelp() {
-  console.log(`dev-prompt — 跨框架瀏覽器／手機畫面點選標註工具
+  console.log(`dev-prompt — 跨框架瀏覽器／手機畫面點選標註與 Agent 自動派送工具
 
 用法：
   dev-prompt [目標網址] [選項]
-  dev-prompt list [--out <檔案>]
-  dev-prompt done <id|all> [--out <檔案>]
-  dev-prompt clear [--out <檔案>]
+  dev-prompt wait [--port 8787]
+  dev-prompt prompt [--project <dir>|--out <檔案>]
+  dev-prompt list [--project <dir>|--out <檔案>]
+  dev-prompt done <id|all> [--project <dir>|--out <檔案>]
+  dev-prompt clear [--project <dir>|--out <檔案>]
 
 常用範例：
-  dev-prompt http://127.0.0.1:8000
-  dev-prompt http://localhost:3000 --port 8787 --project ~/HearWell
-  dev-prompt https://tingpal.tw --out ~/HearWell/.dev-prompts.json
+  dev-prompt http://127.0.0.1:8000 --project ~/HearWell
+  dev-prompt http://127.0.0.1:8000 --project ~/HearWell --agent agy
+  dev-prompt http://127.0.0.1:8001 --port 8787 --exec "py313/bin/python manage.py runserver 8001"
+  dev-prompt wait --port 8787
 
 選項：
   --target <url>     要代理的目標網站（預設 http://127.0.0.1:8000）
   --port <number>    本機代理埠號（預設 8787）
   --host <ip>        監聽位址（預設 0.0.0.0，允許同 Wi-Fi 手機連線）
-  --project <dir>    將標註存到指定專案的 .dev-prompts.json
-  --out <file>       指定標註 JSON 檔案路徑（預設為目前目錄的 .dev-prompts.json）
+  --project <dir>    目標專案目錄（預設為目前目錄；Agent 會在此目錄執行修改）
+  --out <file>       指定標註 JSON 檔案路徑（預設為專案目錄的 .dev-prompts.json）
+  --agent <mode>     自動派送對象：auto（預設）| antigravity-app | agy | claude | none | 自訂指令
+  --agent-args <s>   額外傳給 agy / claude 的參數（以空白分隔）
+  --exec <cmd>       同時啟動並管理上游開發伺服器（適合整合進 Claude Desktop launch.json）
   -h, --help         顯示說明`);
 }
 
@@ -37,11 +47,14 @@ function parseArgs(argv) {
     host: "0.0.0.0",
     out: null,
     project: null,
+    agent: "auto",
+    agentArgs: [],
+    exec: null,
     help: false,
   };
 
   const raw = [...argv];
-  if (raw[0] && ["list", "done", "clear"].includes(raw[0])) {
+  if (raw[0] && ["list", "prompt", "done", "clear", "wait"].includes(raw[0])) {
     args.command = raw.shift();
   }
 
@@ -59,6 +72,14 @@ function parseArgs(argv) {
       args.out = raw[++i];
     } else if (token === "--project") {
       args.project = raw[++i];
+    } else if (token === "--agent") {
+      args.agent = raw[++i];
+    } else if (token === "--agent-args") {
+      args.agentArgs = String(raw[++i] || "")
+        .split(/\s+/)
+        .filter(Boolean);
+    } else if (token === "--exec") {
+      args.exec = raw[++i];
     } else if (!token.startsWith("-")) {
       args.positionals.push(token);
     } else {
@@ -68,14 +89,15 @@ function parseArgs(argv) {
   return args;
 }
 
+function resolveProjectDir(args) {
+  return path.resolve(args.project || process.cwd());
+}
+
 function resolveStorePath(args) {
   if (args.out) {
     return path.resolve(args.out);
   }
-  if (args.project) {
-    return path.resolve(args.project, ".dev-prompts.json");
-  }
-  return path.resolve(process.cwd(), ".dev-prompts.json");
+  return path.join(resolveProjectDir(args), ".dev-prompts.json");
 }
 
 function getLanAddresses() {
@@ -89,6 +111,27 @@ function getLanAddresses() {
     }
   }
   return addresses;
+}
+
+function runWait(port) {
+  const req = http.get(`http://127.0.0.1:${port}/__dev-prompt__/wait/`, (res) => {
+    const chunks = [];
+    res.on("data", (chunk) => chunks.push(chunk));
+    res.on("end", () => {
+      try {
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (payload.prompt) {
+          process.stdout.write(payload.prompt);
+        }
+      } catch {
+        process.exit(1);
+      }
+    });
+  });
+  req.on("error", (err) => {
+    console.error(`連不到本機 dev-prompt（127.0.0.1:${port}）：${err.message}`);
+    process.exit(1);
+  });
 }
 
 function main() {
@@ -105,10 +148,22 @@ function main() {
     return;
   }
 
+  if (args.command === "wait") {
+    runWait(args.port);
+    return;
+  }
+
+  const projectDir = resolveProjectDir(args);
   const store = new PromptStore(resolveStorePath(args));
 
   if (args.command === "list") {
     process.stdout.write(formatMarkdown(store.load()));
+    return;
+  }
+
+  if (args.command === "prompt") {
+    const text = buildAgentPrompt({ items: store.load(), projectDir });
+    process.stdout.write(text || "目前沒有待處理的標註。\n");
     return;
   }
 
@@ -138,7 +193,38 @@ function main() {
     process.exit(1);
   }
 
-  const server = createProxyServer({ target, store });
+  let upstreamChild = null;
+  if (args.exec) {
+    upstreamChild = spawn(args.exec, {
+      cwd: projectDir,
+      shell: true,
+      stdio: "inherit",
+    });
+    upstreamChild.on("exit", (code) => {
+      if (code && code !== 0) {
+        console.error(`上游指令已結束（結束碼 ${code}）`);
+      }
+      process.exit(code || 0);
+    });
+    const shutdown = () => {
+      if (upstreamChild && !upstreamChild.killed) {
+        upstreamChild.kill("SIGTERM");
+      }
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  }
+
+  const resolvedAgent = resolveAgentMode(args.agent);
+  const server = createProxyServer({
+    target,
+    store,
+    projectDir,
+    agent: args.agent,
+    agentArgs: args.agentArgs,
+  });
+
   server.listen(args.port, args.host, () => {
     const lanIps = getLanAddresses();
     console.log("");
@@ -152,9 +238,11 @@ function main() {
     } else {
       console.log("  手機打開：未偵測到區網 IP（請確認電腦已連上 Wi-Fi）");
     }
+    console.log(`  專案目錄：${projectDir}`);
+    console.log(`  派送模式：${resolvedAgent}（若有對話正在執行 dev-prompt wait 會優先送到該對話）`);
     console.log(`  標註存檔：${store.filePath}`);
     console.log("");
-    console.log("提示：在電腦或手機畫面點右下角「點選標註」送出後，回 AI 對話說「處理標註」即可。");
+    console.log("提示：點右下角「點選標註」，可先存清單打包送出，也能按「直接送給 Agent」立刻改。");
     console.log("按 Ctrl+C 結束。");
   });
 }

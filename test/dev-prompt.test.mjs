@@ -6,6 +6,8 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import zlib from "node:zlib";
 
+import { AgentDispatcher } from "../src/dispatcher.mjs";
+import { buildAgentPrompt } from "../src/prompt-builder.mjs";
 import { adaptCspHeader, createProxyServer, rewriteSetCookie } from "../src/proxy.mjs";
 import { PromptStore, formatMarkdown } from "../src/store.mjs";
 
@@ -22,7 +24,20 @@ function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
-describe("CSP and cookie helpers", () => {
+async function waitForStatus(url, predicate, timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (predicate(data)) {
+      return data;
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  throw new Error("Timed out waiting for dispatch status");
+}
+
+describe("CSP, cookie, and prompt builder helpers", () => {
   test("extracts nonce from strict CSP and keeps self/unsafe-inline usable", () => {
     const csp = "default-src 'self'; script-src 'self' 'nonce-abc123'; style-src 'self'";
     const result = adaptCspHeader(csp);
@@ -40,6 +55,40 @@ describe("CSP and cookie helpers", () => {
     assert.doesNotMatch(cookies[0], /\bSecure\b/i);
     assert.doesNotMatch(cookies[0], /\bDomain=/i);
     assert.match(cookies[0], /sessionid=xyz/);
+  });
+
+  test("organizes open annotations by page into a structured AI prompt", () => {
+    const prompt = buildAgentPrompt({
+      projectDir: "/tmp/demo-app",
+      targetUrl: "http://127.0.0.1:8000",
+      items: [
+        {
+          id: "aa11",
+          status: "open",
+          url: "/home/",
+          page_title: "首頁",
+          device: "mobile",
+          viewport: { width: 390, height: 844 },
+          selector: "main > a.cta",
+          tag: "a",
+          text: "開始篩檢",
+          attributes: "href=/screening/",
+          rect: { top: 100, left: 20, width: 350, height: 48 },
+          prompt: "按鈕高度再高一點",
+        },
+        {
+          id: "bb22",
+          status: "done",
+          url: "/home/",
+          prompt: "已完成不應出現",
+        },
+      ],
+    });
+    assert.match(prompt, /專案目錄：`\/tmp\/demo-app`/);
+    assert.match(prompt, /### 頁面：`\/home\/`（首頁）/);
+    assert.match(prompt, /標註 `#aa11`.*手機 390×844/);
+    assert.match(prompt, /按鈕高度再高一點/);
+    assert.doesNotMatch(prompt, /已完成不應出現/);
   });
 });
 
@@ -112,7 +161,12 @@ describe("dev-prompt proxy and store", () => {
     });
 
     upstreamUrl = await listen(upstreamServer);
-    proxyServer = createProxyServer({ target: upstreamUrl, store });
+    proxyServer = createProxyServer({
+      target: upstreamUrl,
+      store,
+      projectDir: tmpDir,
+      agent: "none",
+    });
     proxyUrl = await listen(proxyServer);
   });
 
@@ -205,10 +259,10 @@ describe("dev-prompt proxy and store", () => {
     assert.equal(item.status, "open");
     assert.equal(item.target, new URL(upstreamUrl).origin);
 
-    const listRes = await fetch(`${proxyUrl}/__dev-prompt__/items/`);
-    const { items } = await listRes.json();
-    assert.equal(items.length, 1);
-    assert.equal(items[0].id, item.id);
+    const previewRes = await fetch(`${proxyUrl}/__dev-prompt__/prompt-preview/`);
+    const preview = await previewRes.json();
+    assert.equal(preview.open_count, 1);
+    assert.match(preview.prompt, /手機版按鈕間距拉大一點/);
 
     const mdRes = await fetch(`${proxyUrl}/__dev-prompt__/prompts.md`);
     const md = await mdRes.text();
@@ -232,10 +286,190 @@ describe("dev-prompt proxy and store", () => {
     assert.equal(delRes.status, 200);
     assert.equal(store.load().length, 0);
 
-    await store.add({ prompt: "第二筆測試", viewport: { width: 1280, height: 800 } });
+    store.add({ prompt: "第二筆測試", viewport: { width: 1280, height: 800 } });
     assert.equal(store.load()[0].device, "desktop");
     const clearRes = await fetch(`${proxyUrl}/__dev-prompt__/items/clear/`, { method: "POST" });
     assert.equal(clearRes.status, 200);
     assert.equal(store.load().length, 0);
+  });
+
+  test("hands off organized prompt immediately to an active conversation waiter", async () => {
+    const item = store.add({
+      url: "/screening/",
+      viewport: { width: 390, height: 844 },
+      selector: "button.submit",
+      tag: "button",
+      text: "送出",
+      prompt: "改成大一點的藍色按鈕",
+    });
+
+    const waitPromise = fetch(`${proxyUrl}/__dev-prompt__/wait/`).then((r) => r.json());
+    // Wait briefly so the waiter registers on the server.
+    await new Promise((r) => setTimeout(r, 30));
+
+    const dispatchRes = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_ids: [item.id] }),
+    });
+    assert.equal(dispatchRes.status, 202);
+    const dispatchData = await dispatchRes.json();
+    assert.equal(dispatchData.job.status, "handed_off");
+    assert.equal(dispatchData.job.mode, "active-conversation");
+
+    const received = await waitPromise;
+    assert.deepEqual(received.item_ids, [item.id]);
+    assert.match(received.prompt, /改成大一點的藍色按鈕/);
+    store.clear();
+  });
+});
+
+describe("AgentDispatcher backends", () => {
+  test("runs a custom agent command, captures summary, and marks items done", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dev-prompt-agent-"));
+    const capturedFile = path.join(tmpDir, "received-prompt.txt");
+    const store = new PromptStore(path.join(tmpDir, ".dev-prompts.json"));
+    const dummyUpstream = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    const upstreamUrl = await listen(dummyUpstream);
+
+    const fakeAgentPath = path.join(tmpDir, "fake-agent.mjs");
+    fs.writeFileSync(
+      fakeAgentPath,
+      [
+        'import fs from "node:fs";',
+        'const input = fs.readFileSync(0, "utf8");',
+        `fs.writeFileSync(${JSON.stringify(capturedFile)}, input, "utf8");`,
+        'console.log("已更新按鈕樣式與間距");',
+      ].join("\n"),
+      "utf8"
+    );
+    const customCmd = `node ${JSON.stringify(fakeAgentPath)}`;
+    const proxy = createProxyServer({
+      target: upstreamUrl,
+      store,
+      projectDir: tmpDir,
+      agent: customCmd,
+    });
+    const proxyUrl = await listen(proxy);
+
+    try {
+      const item = store.add({
+        url: "/guide/",
+        viewport: { width: 390, height: 844 },
+        selector: "h1.title",
+        tag: "h1",
+        text: "選配指引",
+        prompt: "標題下方多留一點空白",
+      });
+
+      const res = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_ids: [item.id] }),
+      });
+      assert.equal(res.status, 202);
+
+      const finalStatus = await waitForStatus(
+        `${proxyUrl}/__dev-prompt__/dispatch/status/`,
+        (data) => data.job.status === "done" || data.job.status === "error"
+      );
+      assert.equal(finalStatus.job.status, "done");
+      assert.match(finalStatus.job.summary, /已更新按鈕樣式與間距/);
+
+      const savedPrompt = fs.readFileSync(capturedFile, "utf8");
+      assert.match(savedPrompt, /標題下方多留一點空白/);
+
+      const updatedItems = store.load();
+      assert.equal(updatedItems[0].status, "done");
+      assert.match(updatedItems[0].resolution, /已更新按鈕樣式與間距/);
+    } finally {
+      await close(proxy);
+      await close(dummyUpstream);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("dispatches organized prompt directly to Antigravity App ConversationService", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dev-prompt-agy-app-"));
+    const store = new PromptStore(path.join(tmpDir, ".dev-prompts.json"));
+    let receivedReq = null;
+
+    const mockLs = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        receivedReq = {
+          url: req.url,
+          headers: req.headers,
+          body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ conversation: { id: "conv-12345678" } }));
+      });
+    });
+    const mockLsUrl = await listen(mockLs);
+    const lsHostPort = new URL(mockLsUrl).host;
+
+    const dummyUpstream = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    const upstreamUrl = await listen(dummyUpstream);
+
+    const dispatcher = new AgentDispatcher({
+      store,
+      projectDir: tmpDir,
+      targetUrl: upstreamUrl,
+      agent: "auto",
+      env: {
+        ...process.env,
+        ANTIGRAVITY_LS_ADDRESS: lsHostPort,
+        ANTIGRAVITY_CSRF_TOKEN: "secret-csrf",
+        ANTIGRAVITY_PROJECT_ID: "proj-hearwell",
+      },
+    });
+    assert.equal(dispatcher.agent, "antigravity-app");
+
+    const proxy = createProxyServer({ target: upstreamUrl, store, dispatcher });
+    const proxyUrl = await listen(proxy);
+
+    try {
+      store.add({
+        url: "/about/",
+        viewport: { width: 1280, height: 800 },
+        selector: "footer a",
+        tag: "a",
+        text: "意見回饋",
+        prompt: "把頁尾文字對齊中央",
+      });
+
+      const res = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(res.status, 202);
+
+      const finalStatus = await waitForStatus(
+        `${proxyUrl}/__dev-prompt__/dispatch/status/`,
+        (data) => data.job.status === "handed_off" || data.job.status === "error"
+      );
+      assert.equal(finalStatus.job.status, "handed_off");
+      assert.match(finalStatus.job.summary, /Antigravity App/);
+      assert.equal(receivedReq.url, "/product.v1.ConversationService/CreateConversation");
+      assert.equal(receivedReq.headers["x-antigravity-csrf-token"], "secret-csrf");
+      assert.equal(receivedReq.headers["connect-protocol-version"], "1");
+      assert.equal(receivedReq.body.projectId, "proj-hearwell");
+      assert.deepEqual(receivedReq.body.tags, ["dev-prompt"]);
+      assert.match(receivedReq.body.prompt[0].text, /把頁尾文字對齊中央/);
+    } finally {
+      await close(proxy);
+      await close(dummyUpstream);
+      await close(mockLs);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

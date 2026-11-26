@@ -7,6 +7,7 @@ import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
+import { AgentDispatcher } from "./dispatcher.mjs";
 import { formatMarkdown } from "./store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -204,7 +205,15 @@ function rewriteUpstreamHeaders(reqHeaders, targetUrl) {
   return headers;
 }
 
-async function handleInternalRoute(req, res, pathname, store, targetOrigin, overlayPath) {
+async function handleInternalRoute(
+  req,
+  res,
+  pathname,
+  store,
+  dispatcher,
+  targetOrigin,
+  overlayPath
+) {
   if (pathname === "/__dev-prompt__/overlay.js" && req.method === "GET") {
     const source = fs.readFileSync(overlayPath);
     res.writeHead(200, {
@@ -227,9 +236,68 @@ async function handleInternalRoute(req, res, pathname, store, targetOrigin, over
     return true;
   }
 
+  if (pathname === "/__dev-prompt__/prompt-preview/" || pathname === "/__dev-prompt__/prompt-preview") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "不支援的方法" });
+      return true;
+    }
+    const { items, prompt } = dispatcher.buildPreview();
+    sendJson(res, 200, {
+      open_count: items.length,
+      prompt,
+      ...dispatcher.getStatus(),
+    });
+    return true;
+  }
+
+  if (pathname === "/__dev-prompt__/dispatch/" || pathname === "/__dev-prompt__/dispatch") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "不支援的方法" });
+      return true;
+    }
+    try {
+      const raw = await readRequestBody(req);
+      const body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
+      const result = dispatcher.dispatch(body.item_ids || null);
+      sendJson(res, 202, result);
+    } catch (err) {
+      sendJson(res, err.statusCode || 400, { error: err.message || "無法送給 Agent" });
+    }
+    return true;
+  }
+
+  if (
+    pathname === "/__dev-prompt__/dispatch/status/" ||
+    pathname === "/__dev-prompt__/dispatch/status"
+  ) {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "不支援的方法" });
+      return true;
+    }
+    sendJson(res, 200, dispatcher.getStatus());
+    return true;
+  }
+
+  if (pathname === "/__dev-prompt__/wait/" || pathname === "/__dev-prompt__/wait") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "不支援的方法" });
+      return true;
+    }
+    const unregister = dispatcher.registerWaiter((payload) => {
+      if (!res.writableEnded) {
+        sendJson(res, 200, payload);
+      }
+    });
+    req.on("close", unregister);
+    return true;
+  }
+
   if (pathname === "/__dev-prompt__/items/" || pathname === "/__dev-prompt__/items") {
     if (req.method === "GET") {
-      sendJson(res, 200, { items: store.load() });
+      sendJson(res, 200, {
+        items: store.load(),
+        ...dispatcher.getStatus(),
+      });
       return true;
     }
     if (req.method === "POST") {
@@ -290,11 +358,28 @@ async function handleInternalRoute(req, res, pathname, store, targetOrigin, over
   return false;
 }
 
-export function createProxyServer({ target, store, overlayPath = DEFAULT_OVERLAY_PATH }) {
+export function createProxyServer({
+  target,
+  store,
+  dispatcher = null,
+  projectDir = process.cwd(),
+  agent = "auto",
+  agentArgs = [],
+  overlayPath = DEFAULT_OVERLAY_PATH,
+}) {
   const targetUrl = new URL(target);
   const isHttps = targetUrl.protocol === "https:";
   const transport = isHttps ? https : http;
   const upstreamPort = targetUrl.port ? Number(targetUrl.port) : isHttps ? 443 : 80;
+  const activeDispatcher =
+    dispatcher ||
+    new AgentDispatcher({
+      store,
+      projectDir,
+      targetUrl: targetUrl.origin,
+      agent,
+      agentArgs,
+    });
 
   const server = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -304,6 +389,7 @@ export function createProxyServer({ target, store, overlayPath = DEFAULT_OVERLAY
         res,
         reqUrl.pathname,
         store,
+        activeDispatcher,
         targetUrl.origin,
         overlayPath
       );
