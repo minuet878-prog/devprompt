@@ -349,8 +349,8 @@
     </div>
 
     <div class="dp-banner" hidden role="status">
-      <span class="dp-banner-text">點選畫面上想改的地方（可正常滑動）</span>
-      <button type="button" class="dp-btn dp-btn-secondary" data-action="cancel-pick">取消</button>
+      <span class="dp-banner-text">點選畫面上想改的地方，可以連續點好幾個（可正常滑動）</span>
+      <button type="button" class="dp-btn dp-btn-secondary" data-action="cancel-pick">結束標註</button>
     </div>
 
     <div class="dp-dock" aria-label="dev-prompt 開發標註工具">
@@ -427,6 +427,8 @@
   const toastEl = shadow.querySelector(".dp-toast");
 
   let picking = false;
+  // On from 點選標註 until 結束標註 or Esc: each saved or cancelled note goes back to picking.
+  let annotating = false;
   let selectedEl = null;
   let items = [];
   let doneOpen = false;
@@ -522,13 +524,20 @@
   function stopPicking() {
     picking = false;
     banner.hidden = true;
-    dock.hidden = false;
     document.removeEventListener("pointermove", onPointerMove, true);
     document.removeEventListener("click", onPickClick, true);
     document.removeEventListener("keydown", onKeyDown, true);
   }
 
+  function endAnnotating() {
+    annotating = false;
+    stopPicking();
+    highlight.hidden = true;
+    dock.hidden = false;
+  }
+
   function startPicking() {
+    annotating = true;
     picking = true;
     dock.hidden = true;
     minPill.hidden = true;
@@ -558,17 +567,17 @@
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    // Stop first: stopPicking drops the Esc listener that openSheet adds.
+    stopPicking();
     if (event.target instanceof Element) {
       openSheet(event.target);
     }
-    stopPicking();
   }
 
   function onKeyDown(event) {
     if (event.key === "Escape") {
       if (picking) {
-        stopPicking();
-        highlight.hidden = true;
+        endAnnotating();
       } else if (!sheetWrap.hidden) {
         closeSheet();
       } else if (!drawerWrap.hidden) {
@@ -605,6 +614,11 @@
     highlight.hidden = true;
     selectedEl = null;
     document.removeEventListener("keydown", onKeyDown, true);
+    if (annotating) {
+      startPicking();
+    } else {
+      dock.hidden = false;
+    }
   }
 
   function updateCount() {
@@ -812,11 +826,12 @@
       if (sendImmediately) {
         const ok = await dispatchToAgent([data.item.id]);
         if (!ok) {
+          endAnnotating();
           drawerWrap.hidden = false;
           renderDrawer();
         }
       } else {
-        showToast("已存進清單！逛完再點「清單 → 整理並送給 Agent」");
+        showToast("已存進清單，可以接著點下一個");
       }
     } catch {
       sheetError.textContent = "連不到 dev-prompt 代理伺服器";
@@ -1010,8 +1025,7 @@
     if (action === "start-pick") {
       startPicking();
     } else if (action === "cancel-pick") {
-      stopPicking();
-      highlight.hidden = true;
+      endAnnotating();
     } else if (action === "minimize") {
       dock.hidden = true;
       minPill.hidden = false;
