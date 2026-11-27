@@ -295,6 +295,33 @@
         font-size: 0.9rem;
         color: #166534;
       }
+      .dp-done {
+        margin-top: 0.35rem;
+        padding-top: 0.3rem;
+        border-top: 1px solid #cbd5e1;
+      }
+      .dp-done > summary {
+        min-height: 2.75rem;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        cursor: pointer;
+        font-weight: 700;
+        color: #166534;
+        list-style: none;
+      }
+      .dp-done > summary::-webkit-details-marker {
+        display: none;
+      }
+      .dp-done > summary::before {
+        content: "▸";
+      }
+      .dp-done[open] > summary::before {
+        content: "▾";
+      }
+      .dp-done > .dp-item {
+        margin-top: 0.65rem;
+      }
       .dp-empty {
         margin: 0.5rem 0;
         color: #475569;
@@ -402,6 +429,7 @@
   let picking = false;
   let selectedEl = null;
   let items = [];
+  let doneOpen = false;
   let dispatchInfo = { job: { status: "idle" }, dispatch_mode: "auto", has_waiter: false };
   let toastTimer = null;
   let pollTimer = null;
@@ -881,6 +909,7 @@
     }
   }
 
+  // Open items on top, newest first; done ones fold away under 已完成 so the list does not pile up.
   function renderDrawer() {
     renderStatusCard();
     listEl.innerHTML = "";
@@ -891,59 +920,85 @@
       listEl.appendChild(empty);
       return;
     }
-    for (const item of [...items].reverse()) {
-      const card = document.createElement("div");
-      card.className = "dp-item";
-
-      const top = document.createElement("div");
-      top.className = "dp-row";
-
-      const badge = document.createElement("span");
-      const done = item.status === "done";
-      badge.className = `dp-badge ${done ? "dp-badge-done" : "dp-badge-open"}`;
-      const device = item.device === "mobile" ? "手機" : "電腦";
-      const size = item.viewport && item.viewport.width ? ` ${item.viewport.width}px` : "";
-      badge.textContent = `${done ? "已處理" : "待處理"} · ${device}${size}`;
-
-      const actions = document.createElement("div");
-      actions.className = "dp-actions";
-
-      const toggleBtn = document.createElement("button");
-      toggleBtn.type = "button";
-      toggleBtn.className = "dp-btn dp-btn-surface";
-      toggleBtn.textContent = done ? "重開" : "完成";
-      toggleBtn.addEventListener("click", () => toggleStatus(item));
-
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "dp-btn dp-btn-surface";
-      delBtn.textContent = "刪除";
-      delBtn.addEventListener("click", () => deleteItem(item.id));
-
-      actions.append(toggleBtn, delBtn);
-      top.append(badge, actions);
-
-      const meta = document.createElement("div");
-      meta.className = "dp-target-meta";
-      meta.textContent = `${item.url || "/"} · ${item.created_at || ""}`;
-
-      const selector = document.createElement("div");
-      selector.className = "dp-target-selector";
-      selector.textContent = `${item.selector || `<${item.tag}>`}${item.text ? ` · 「${item.text.slice(0, 40)}」` : ""}`;
-
-      const prompt = document.createElement("p");
-      prompt.className = "dp-prompt-text";
-      prompt.textContent = item.prompt;
-
-      card.append(top, meta, selector, prompt);
-      if (item.resolution) {
-        const resNote = document.createElement("p");
-        resNote.className = "dp-resolution";
-        resNote.textContent = `處理紀錄：${item.resolution}`;
-        card.append(resNote);
-      }
-      listEl.appendChild(card);
+    const newestFirst = [...items].reverse();
+    const openItems = newestFirst.filter((item) => item.status !== "done");
+    const doneItems = newestFirst.filter((item) => item.status === "done");
+    if (!openItems.length) {
+      const empty = document.createElement("p");
+      empty.className = "dp-empty";
+      empty.textContent = "目前沒有待處理的標註。";
+      listEl.appendChild(empty);
     }
+    for (const item of openItems) {
+      listEl.appendChild(makeCard(item));
+    }
+    if (doneItems.length) {
+      const section = document.createElement("details");
+      section.className = "dp-done";
+      // The list redraws while a send is polled; keep the section as the person left it.
+      section.open = doneOpen;
+      section.addEventListener("toggle", () => {
+        doneOpen = section.open;
+      });
+      const summary = document.createElement("summary");
+      summary.textContent = `已完成（${doneItems.length}）`;
+      section.append(summary, ...doneItems.map(makeCard));
+      listEl.appendChild(section);
+    }
+  }
+
+  function makeCard(item) {
+    const card = document.createElement("div");
+    card.className = "dp-item";
+
+    const top = document.createElement("div");
+    top.className = "dp-row";
+
+    const badge = document.createElement("span");
+    const done = item.status === "done";
+    badge.className = `dp-badge ${done ? "dp-badge-done" : "dp-badge-open"}`;
+    const device = item.device === "mobile" ? "手機" : "電腦";
+    const size = item.viewport && item.viewport.width ? ` ${item.viewport.width}px` : "";
+    badge.textContent = `${done ? "已處理" : "待處理"} · ${device}${size}`;
+
+    const actions = document.createElement("div");
+    actions.className = "dp-actions";
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "dp-btn dp-btn-surface";
+    toggleBtn.textContent = done ? "重開" : "完成";
+    toggleBtn.addEventListener("click", () => toggleStatus(item));
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "dp-btn dp-btn-surface";
+    delBtn.textContent = "刪除";
+    delBtn.addEventListener("click", () => deleteItem(item.id));
+
+    actions.append(toggleBtn, delBtn);
+    top.append(badge, actions);
+
+    const meta = document.createElement("div");
+    meta.className = "dp-target-meta";
+    meta.textContent = `${item.url || "/"} · ${item.created_at || ""}`;
+
+    const selector = document.createElement("div");
+    selector.className = "dp-target-selector";
+    selector.textContent = `${item.selector || `<${item.tag}>`}${item.text ? ` · 「${item.text.slice(0, 40)}」` : ""}`;
+
+    const prompt = document.createElement("p");
+    prompt.className = "dp-prompt-text";
+    prompt.textContent = item.prompt;
+
+    card.append(top, meta, selector, prompt);
+    if (item.resolution) {
+      const resNote = document.createElement("p");
+      resNote.className = "dp-resolution";
+      resNote.textContent = `處理紀錄：${item.resolution}`;
+      card.append(resNote);
+    }
+    return card;
   }
 
   shadow.addEventListener("click", (event) => {
