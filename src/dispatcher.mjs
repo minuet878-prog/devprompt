@@ -1,35 +1,27 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 
 import { buildAgentPrompt } from "./prompt-builder.mjs";
 
-function hasCommand(cmd) {
-  const result = spawnSync("which", [cmd], { stdio: "ignore" });
-  return result.status === 0;
-}
-
+// "conversation" never starts an agent of its own: a send waits for whichever
+// conversation runs `dev-prompt wait` (Claude Code, Codex, Antigravity...).
+// An installed CLI such as agy runs only when asked for by name.
 export function resolveAgentMode(requested = "auto", env = process.env) {
+  if (requested === "none") {
+    return "conversation";
+  }
   if (requested && requested !== "auto") {
     return requested;
   }
   if (env.ANTIGRAVITY_LS_ADDRESS && env.ANTIGRAVITY_CSRF_TOKEN) {
     return "antigravity-app";
   }
-  if (hasCommand("agy")) {
-    return "agy";
-  }
-  if (hasCommand("claude")) {
-    return "claude";
-  }
-  return "none";
+  return "conversation";
 }
 
 function summarizeOutput(text) {
   const cleaned = String(text || "").trim();
-  if (!cleaned) {
-    return "Agent 已完成修改，請重新整理畫面確認。";
-  }
   const lines = cleaned.split(/\r?\n/).filter((line) => line.trim());
   const tail = lines.slice(-6).join("\n");
   return tail.length > 420 ? `${tail.slice(0, 417)}...` : tail;
@@ -89,6 +81,7 @@ export class AgentDispatcher {
     this.agentArgs = Array.isArray(agentArgs) ? agentArgs : [];
     this.env = env;
     this.waiters = new Set();
+    this.pending = null;
     this.currentJob = {
       id: null,
       status: "idle",
@@ -111,9 +104,33 @@ export class AgentDispatcher {
   }
 
   registerWaiter(resolveFn) {
+    if (this.pending) {
+      const payload = this.pending;
+      this.pending = null;
+      this._handOff([resolveFn], payload);
+      return () => {};
+    }
     this.waiters.add(resolveFn);
     return () => {
       this.waiters.delete(resolveFn);
+    };
+  }
+
+  _handOff(listeners, payload) {
+    for (const resolveFn of listeners) {
+      resolveFn(payload);
+    }
+    const now = new Date().toISOString();
+    this.currentJob = {
+      id: payload.job_id,
+      status: "handed_off",
+      mode: "active-conversation",
+      item_ids: payload.item_ids,
+      prompt: payload.prompt,
+      summary: `已將 ${payload.item_ids.length} 筆整理好的 Prompt 送到目前對話中的 Agent，請在對話視窗查看修改進度。`,
+      error: "",
+      started_at: now,
+      finished_at: now,
     };
   }
 
@@ -150,40 +167,36 @@ export class AgentDispatcher {
     const jobId = crypto.randomBytes(4).toString("hex");
     const ids = items.map((item) => item.id);
     const now = new Date().toISOString();
+    const payload = {
+      job_id: jobId,
+      mode: "active-conversation",
+      item_ids: ids,
+      items,
+      prompt,
+    };
 
     if (this.waiters.size > 0) {
-      const payload = {
-        job_id: jobId,
-        mode: "active-conversation",
-        item_ids: ids,
-        items,
-        prompt,
-      };
       const listeners = [...this.waiters];
       this.waiters.clear();
-      for (const resolveFn of listeners) {
-        resolveFn(payload);
-      }
-      this.currentJob = {
-        id: jobId,
-        status: "handed_off",
-        mode: "active-conversation",
-        item_ids: ids,
-        prompt,
-        summary: `已將 ${ids.length} 筆整理好的 Prompt 送到目前對話中的 Agent，請在對話視窗查看修改進度。`,
-        error: "",
-        started_at: now,
-        finished_at: now,
-      };
+      this._handOff(listeners, payload);
       return { job: { ...this.currentJob }, prompt };
     }
 
-    if (this.agent === "none") {
-      const err = new Error(
-        "目前未設定自動派送 Agent（請啟動時加上 --agent agy 或 --agent claude，或在對話裡跑 dev-prompt wait）"
-      );
-      err.statusCode = 400;
-      throw err;
+    if (this.agent === "conversation") {
+      // A later send replaces the queued one; it already holds every open item it picked.
+      this.pending = payload;
+      this.currentJob = {
+        id: jobId,
+        status: "queued",
+        mode: this.agent,
+        item_ids: ids,
+        prompt,
+        summary: "還沒有對話在等。請在你開著的 Agent 對話裡跑 dev-prompt wait，它一開始等就會收到。",
+        error: "",
+        started_at: now,
+        finished_at: null,
+      };
+      return { job: { ...this.currentJob }, prompt };
     }
 
     this.currentJob = {
@@ -299,7 +312,11 @@ export class AgentDispatcher {
       child.on("close", (code) => {
         const outText = Buffer.concat(stdout).toString("utf8");
         const errText = Buffer.concat(stderr).toString("utf8");
-        if (code === 0) {
+        if (code === 0 && !outText.trim()) {
+          // agy -p exits 0 and prints nothing when a tool call it needs is denied,
+          // so a silent run is no proof that anything changed.
+          reject(new Error(`${command} 結束了但沒有回報任何結果，標註保持未處理，請到專案確認有沒有改動`));
+        } else if (code === 0) {
           resolve(summarizeOutput(outText));
         } else {
           reject(

@@ -32,7 +32,7 @@ function printHelp() {
   --host <ip>        監聽位址（預設 0.0.0.0，允許同 Wi-Fi 手機連線）
   --project <dir>    目標專案目錄（預設為目前目錄；Agent 會在此目錄執行修改）
   --out <file>       指定標註 JSON 檔案路徑（預設為專案目錄的 .dev-prompts.json）
-  --agent <mode>     自動派送對象：auto（預設）| antigravity-app | agy | claude | none | 自訂指令
+  --agent <mode>     派送對象：auto（預設，排隊等開著的對話跑 dev-prompt wait 來拿；在 Antigravity App 裡則開新對話）| antigravity-app | agy | claude | 自訂指令
   --agent-args <s>   額外傳給 agy / claude 的參數（以空白分隔）
   --exec <cmd>       同時啟動並管理上游開發伺服器（適合整合進 Claude Desktop launch.json）
   -h, --help         顯示說明`);

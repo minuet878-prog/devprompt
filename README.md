@@ -11,12 +11,14 @@
   - **直接送給 Agent**：只想改一處時，點 **「直接送給 Agent」** 立即整理並開改。
 - **自動整理成工程 Prompt**：依頁面分組，自動附上裝置與螢幕寬度（手機／電腦）、CSS 選擇器、元件文字、屬性、畫面座標與專案規範提醒。
 - **自動銜接正在對話的 Agent 或背景 Agent**：
-  1. 若有對話正在執行 `dev-prompt wait`，送出後**直接喚醒原本那個對話**（保留完整上下文！）。
-  2. 若沒有對話在等，依 `--agent` 自動派送：
-     - `antigravity-app`：在 Antigravity App 環境裡直接建立新對話並開始執行。
-     - `agy`：透過 Antigravity CLI（`agy -p --mode accept-edits`）在背景修改，改完在手機／瀏覽器顯示摘要與「重新整理看結果」按鈕。
+  1. 若有對話正在執行 `dev-prompt wait`，送出後**直接喚醒原本那個對話**（保留完整上下文！）。Claude Code、Codex、Antigravity 都可以。
+  2. 若沒有對話在等，預設（`auto`）**先排隊**，不會自己開別的 Agent；你開著的對話一跑 `dev-prompt wait` 就會馬上收到。之後再送會換成最新的一批（已經包含所有未處理標註）。
+  3. 要背景 Agent 自動改，才用 `--agent` 指名：
+     - `antigravity-app`：在 Antigravity App 環境裡直接建立新對話並開始執行（從 Antigravity App 啟動時 `auto` 也會選它）。
+     - `agy`：透過 Antigravity CLI（`agy -p --mode accept-edits`）在背景修改。
      - `claude`：透過 Claude Code CLI（`claude -p --permission-mode acceptEdits`）在背景修改。
      - 自訂指令：任何 CLI（例如 `codex`）都能從標準輸入接收整理好的 Prompt。
+  - 背景 Agent 結束時**沒有印出任何結果**，標註會保持未處理並顯示失敗：`agy -p` 遇到它沒權限跑的指令時會直接停下、什麼都不印，這不代表有改好。
 
 ---
 
@@ -47,7 +49,7 @@ npm link
    - Antigravity 內建瀏覽器：直接請 AI 用 `/browser` 開 `http://127.0.0.1:8787`
 3. 點完標註按下 **「整理並送給 Agent」**（或 **「直接送給 Agent」**）：
    - 若你在對話中請 AI 先跑背景指令 `dev-prompt wait --port 8787`，標註會**直接送回你原本正在聊的那個 Antigravity 對話**！
-   - 若沒跑 `wait`，會自動用 `antigravity-app`（在 Antigravity 視窗內）或 `agy` CLI 開始改，改好後瀏覽器與手機會跳出 **「Agent 已修改完成！點此重新整理看結果」**。
+   - 若還沒跑 `wait`，標註會排隊，畫面顯示「已排隊，等 Agent 對話來拿」；對話開始等就會收到（在 Antigravity 視窗內啟動的則直接開新對話）。
 
 ### 2. 整合進 Claude Desktop（內建預覽窗格自動附帶標註工具）
 
@@ -97,7 +99,7 @@ npm link
 ## 常用指令
 
 ```bash
-dev-prompt http://127.0.0.1:8000 --project ~/HearWell        # 啟動代理（自動選 agent）
+dev-prompt http://127.0.0.1:8000 --project ~/HearWell        # 啟動代理（送出的標註等開著的對話來拿）
 dev-prompt http://localhost:5173 --agent agy                 # 指定用 Antigravity CLI
 dev-prompt http://localhost:3000 --agent claude              # 指定用 Claude Code CLI
 dev-prompt wait --port 8787                                  # 讓目前對話等待瀏覽器送出 Prompt

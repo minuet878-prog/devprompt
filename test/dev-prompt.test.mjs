@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import zlib from "node:zlib";
 
-import { AgentDispatcher } from "../src/dispatcher.mjs";
+import { AgentDispatcher, resolveAgentMode } from "../src/dispatcher.mjs";
 import { buildAgentPrompt } from "../src/prompt-builder.mjs";
 import { adaptCspHeader, createProxyServer, rewriteSetCookie } from "../src/proxy.mjs";
 import { PromptStore, formatMarkdown } from "../src/store.mjs";
@@ -322,9 +322,75 @@ describe("dev-prompt proxy and store", () => {
     assert.match(received.prompt, /改成大一點的藍色按鈕/);
     store.clear();
   });
+
+  test("queues a send made before any conversation waits, for the next waiter to take", async () => {
+    const item = store.add({
+      url: "/",
+      viewport: { width: 390, height: 844 },
+      selector: "h1.bird-title",
+      tag: "h1",
+      text: "聽力變化常常容易被忽略",
+      prompt: "改成 您是否有聽覺困擾？",
+    });
+
+    const dispatchRes = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_ids: [item.id] }),
+    });
+    assert.equal(dispatchRes.status, 202);
+    const dispatchData = await dispatchRes.json();
+    assert.equal(dispatchData.job.status, "queued");
+
+    const received = await fetch(`${proxyUrl}/__dev-prompt__/wait/`).then((r) => r.json());
+    assert.deepEqual(received.item_ids, [item.id]);
+    assert.match(received.prompt, /您是否有聽覺困擾/);
+
+    const status = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/status/`).then((r) => r.json());
+    assert.equal(status.job.status, "handed_off");
+    assert.equal(store.load()[0].status, "open");
+    store.clear();
+  });
 });
 
 describe("AgentDispatcher backends", () => {
+  test("auto mode waits for the open conversation instead of picking an installed CLI", () => {
+    const env = { PATH: process.env.PATH };
+    assert.equal(resolveAgentMode("auto", env), "conversation");
+    assert.equal(resolveAgentMode("none", env), "conversation");
+    assert.equal(resolveAgentMode("agy", env), "agy");
+  });
+
+  test("an agent that exits without saying anything leaves the items open", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dev-prompt-silent-"));
+    const store = new PromptStore(path.join(tmpDir, ".dev-prompts.json"));
+    const fakeAgentPath = path.join(tmpDir, "silent-agent.mjs");
+    fs.writeFileSync(fakeAgentPath, 'import fs from "node:fs"; fs.readFileSync(0, "utf8");\n', "utf8");
+    const dispatcher = new AgentDispatcher({
+      store,
+      projectDir: tmpDir,
+      agent: `node ${JSON.stringify(fakeAgentPath)}`,
+    });
+
+    try {
+      store.add({ url: "/", viewport: { width: 390, height: 844 }, prompt: "改標題" });
+      dispatcher.dispatch();
+      const start = Date.now();
+      while (dispatcher.getStatus().job.status === "running" && Date.now() - start < 4000) {
+        await new Promise((r) => setTimeout(r, 40));
+      }
+
+      const { job } = dispatcher.getStatus();
+      assert.equal(job.status, "error");
+      assert.match(job.error, /沒有回報/);
+      const [item] = store.load();
+      assert.equal(item.status, "open");
+      assert.equal(item.resolution, undefined);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("runs a custom agent command, captures summary, and marks items done", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dev-prompt-agent-"));
     const capturedFile = path.join(tmpDir, "received-prompt.txt");

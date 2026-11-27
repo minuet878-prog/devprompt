@@ -611,10 +611,25 @@
       return;
     }
 
-    if (job.status === "done" || job.status === "handed_off") {
-      statusCard.className = "dp-status-card dp-status-done";
+    // Queued and handed off mean nothing has changed yet, so neither offers a reload.
+    if (job.status === "queued" || job.status === "handed_off") {
+      statusCard.className = "dp-status-card dp-status-running";
       title.textContent =
-        job.status === "handed_off" ? "已整理並送給 Agent！" : "Agent 已修改完成！";
+        job.status === "queued" ? "已排隊，等 Agent 對話來拿" : "已送到你開著的 Agent 對話";
+      header.append(title);
+      statusCard.append(header);
+      if (job.summary) {
+        const p = document.createElement("p");
+        p.className = "dp-status-summary";
+        p.textContent = job.summary;
+        statusCard.append(p);
+      }
+      return;
+    }
+
+    if (job.status === "done") {
+      statusCard.className = "dp-status-card dp-status-done";
+      title.textContent = "Agent 已修改完成！";
       const reloadBtn = document.createElement("button");
       reloadBtn.type = "button";
       reloadBtn.className = "dp-btn dp-btn-success";
@@ -645,7 +660,8 @@
 
   function schedulePollIfRunning() {
     clearTimeout(pollTimer);
-    if (dispatchInfo.job && dispatchInfo.job.status === "running") {
+    const status = dispatchInfo.job && dispatchInfo.job.status;
+    if (status === "running" || status === "queued") {
       pollTimer = setTimeout(async () => {
         const prevStatus = dispatchInfo.job.status;
         await fetchItems();
@@ -653,6 +669,8 @@
           showToast("Agent 已改好！點開清單或直接重新整理看結果");
         } else if (prevStatus === "running" && dispatchInfo.job.status === "error") {
           showToast("Agent 執行失敗，請打開清單查看原因");
+        } else if (prevStatus === "queued" && dispatchInfo.job.status === "handed_off") {
+          showToast("Agent 對話已經收到了");
         }
         schedulePollIfRunning();
       }, 1500);
@@ -703,6 +721,8 @@
       schedulePollIfRunning();
       if (data.job.status === "handed_off") {
         showToast("已整理成 Prompt 並送給 Agent！");
+      } else if (data.job.status === "queued") {
+        showToast("已排隊，Agent 對話一開始等就會收到");
       } else {
         showToast("已整理成 Prompt，Agent 開始修改中…");
       }
