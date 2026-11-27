@@ -374,7 +374,10 @@ describe("dev-prompt proxy and store", () => {
     assert.deepEqual(received.item_ids, [second.id]);
     assert.doesNotMatch(received.prompt, /改標題/);
 
+    const third = store.add({ url: "/", viewport: { width: 1280, height: 800 }, prompt: "還沒送" });
     assert.equal(store.markDone("all"), 2);
+    assert.equal(store.load().find((item) => item.id === third.id).status, "open");
+    assert.equal(store.markDone("all"), 1);
     store.clear();
   });
 

@@ -139,11 +139,17 @@ export class PromptStore {
     return count;
   }
 
+  // "all" finishes what was sent to the agent. Items added since then are still
+  // open and unsent, so they stay; with nothing processing (the agent read the
+  // file itself), every open item counts.
   markDone(idOrAll, resolution = "") {
     const items = this.load();
+    const anyProcessing = items.some((item) => item.status === "processing");
+    const finishes = (item) =>
+      anyProcessing ? item.status === "processing" : item.status !== "done";
     let count = 0;
     for (const item of items) {
-      if (idOrAll === "all" ? item.status !== "done" : item.id === idOrAll) {
+      if (idOrAll === "all" ? finishes(item) : item.id === idOrAll) {
         item.status = "done";
         if (resolution) {
           item.resolution = cleanText(resolution, 500);
