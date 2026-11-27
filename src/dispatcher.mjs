@@ -134,20 +134,26 @@ export class AgentDispatcher {
     };
   }
 
+  // Only items still waiting to be sent: processing ones already went to an agent.
   buildPreview(itemIds = null) {
     const all = this.store.load();
+    const isOpen = (item) => (item.status || "open") === "open";
     const selected =
       Array.isArray(itemIds) && itemIds.length
-        ? all.filter((item) => itemIds.includes(item.id) && item.status !== "done")
-        : all.filter((item) => item.status !== "done");
+        ? all.filter((item) => itemIds.includes(item.id) && isOpen(item))
+        : all.filter(isOpen);
     return {
       items: selected,
-      prompt: buildAgentPrompt({
-        items: selected,
-        projectDir: this.projectDir,
-        targetUrl: this.targetUrl,
-      }),
+      prompt: this._buildPrompt(selected),
     };
+  }
+
+  _buildPrompt(items) {
+    return buildAgentPrompt({
+      items,
+      projectDir: this.projectDir,
+      targetUrl: this.targetUrl,
+    });
   }
 
   dispatch(itemIds = null) {
@@ -157,15 +163,21 @@ export class AgentDispatcher {
       throw err;
     }
 
-    const { items, prompt } = this.buildPreview(itemIds);
-    if (!items.length) {
+    const { items: picked } = this.buildPreview(itemIds);
+    if (!picked.length) {
       const err = new Error("目前沒有待處理的標註可送出");
       err.statusCode = 400;
       throw err;
     }
 
+    // A send still waiting in the queue is replaced by this one, so carry its items along.
+    const carried = this.pending ? this.pending.item_ids : [];
+    const ids = [...new Set([...carried, ...picked.map((item) => item.id)])];
+    this.store.setStatusMany(ids, "processing", ["open"]);
+    const items = this.store.load().filter((item) => ids.includes(item.id) && item.status !== "done");
+    const prompt = this._buildPrompt(items);
+
     const jobId = crypto.randomBytes(4).toString("hex");
-    const ids = items.map((item) => item.id);
     const now = new Date().toISOString();
     const payload = {
       job_id: jobId,
@@ -183,7 +195,6 @@ export class AgentDispatcher {
     }
 
     if (this.agent === "conversation") {
-      // A later send replaces the queued one; it already holds every open item it picked.
       this.pending = payload;
       this.currentJob = {
         id: jobId,
@@ -238,6 +249,8 @@ export class AgentDispatcher {
         };
       }
     } catch (err) {
+      // Nothing was handed over, so the items go back to waiting for a send.
+      this.store.setStatusMany(ids, "open", ["processing"]);
       if (this.currentJob.id === jobId) {
         this.currentJob = {
           ...this.currentJob,

@@ -283,6 +283,18 @@
         background: #dcfce7;
         color: #166534;
       }
+      .dp-badge-processing {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .dp-section-title {
+        margin: 0.5rem 0 0;
+        padding-top: 0.5rem;
+        border-top: 1px solid #cbd5e1;
+        font-size: 1rem;
+        font-weight: 700;
+        color: #92400e;
+      }
       .dp-prompt-text {
         margin: 0;
         font-size: 1rem;
@@ -621,8 +633,10 @@
     }
   }
 
+  const statusOf = (item) => item.status || "open";
+
   function updateCount() {
-    const openCount = items.filter((item) => item.status !== "done").length;
+    const openCount = items.filter((item) => statusOf(item) === "open").length;
     const isRunning = dispatchInfo.job && dispatchInfo.job.status === "running";
     countEl.textContent = isRunning ? "改中" : String(openCount);
     minPill.textContent = isRunning ? "…" : openCount > 0 ? String(openCount) : "標";
@@ -703,7 +717,10 @@
   function schedulePollIfRunning() {
     clearTimeout(pollTimer);
     const status = dispatchInfo.job && dispatchInfo.job.status;
-    if (status === "running" || status === "queued") {
+    const jobActive = status === "running" || status === "queued";
+    // Items sent to a conversation stay 處理中 until it runs `dev-prompt done`; keep checking.
+    const hasProcessing = items.some((item) => statusOf(item) === "processing");
+    if (jobActive || hasProcessing) {
       pollTimer = setTimeout(async () => {
         const prevStatus = dispatchInfo.job.status;
         await fetchItems();
@@ -715,7 +732,7 @@
           showToast("Agent 對話已經收到了");
         }
         schedulePollIfRunning();
-      }, 1500);
+      }, jobActive ? 1500 : 4000);
     }
   }
 
@@ -758,8 +775,8 @@
         return false;
       }
       dispatchInfo.job = data.job;
-      updateCount();
-      renderStatusCard();
+      // The sent items are now 處理中 on the server; pull them so the list and count follow.
+      await fetchItems();
       schedulePollIfRunning();
       if (data.job.status === "handed_off") {
         showToast("已整理成 Prompt 並送給 Agent！");
@@ -842,8 +859,7 @@
     }
   }
 
-  async function toggleStatus(item) {
-    const nextStatus = item.status === "done" ? "open" : "done";
+  async function setItemStatus(item, nextStatus) {
     try {
       const res = await fetch(`${apiBase}${encodeURIComponent(item.id)}/`, {
         method: "PATCH",
@@ -924,7 +940,8 @@
     }
   }
 
-  // Open items on top, newest first; done ones fold away under 已完成 so the list does not pile up.
+  // Open items on top, newest first, then the ones an agent is working on;
+  // done ones fold away under 已完成 so the list does not pile up.
   function renderDrawer() {
     renderStatusCard();
     listEl.innerHTML = "";
@@ -936,8 +953,9 @@
       return;
     }
     const newestFirst = [...items].reverse();
-    const openItems = newestFirst.filter((item) => item.status !== "done");
-    const doneItems = newestFirst.filter((item) => item.status === "done");
+    const openItems = newestFirst.filter((item) => statusOf(item) === "open");
+    const processingItems = newestFirst.filter((item) => statusOf(item) === "processing");
+    const doneItems = newestFirst.filter((item) => statusOf(item) === "done");
     if (!openItems.length) {
       const empty = document.createElement("p");
       empty.className = "dp-empty";
@@ -946,6 +964,15 @@
     }
     for (const item of openItems) {
       listEl.appendChild(makeCard(item));
+    }
+    if (processingItems.length) {
+      const heading = document.createElement("p");
+      heading.className = "dp-section-title";
+      heading.textContent = `處理中（${processingItems.length}）`;
+      listEl.appendChild(heading);
+      for (const item of processingItems) {
+        listEl.appendChild(makeCard(item));
+      }
     }
     if (doneItems.length) {
       const section = document.createElement("details");
@@ -970,28 +997,39 @@
     top.className = "dp-row";
 
     const badge = document.createElement("span");
-    const done = item.status === "done";
-    badge.className = `dp-badge ${done ? "dp-badge-done" : "dp-badge-open"}`;
+    const status = statusOf(item);
+    const badgeLook = {
+      open: ["dp-badge-open", "待處理"],
+      processing: ["dp-badge-processing", "處理中"],
+      done: ["dp-badge-done", "已處理"],
+    }[status] || ["dp-badge-open", "待處理"];
+    badge.className = `dp-badge ${badgeLook[0]}`;
     const device = item.device === "mobile" ? "手機" : "電腦";
     const size = item.viewport && item.viewport.width ? ` ${item.viewport.width}px` : "";
-    badge.textContent = `${done ? "已處理" : "待處理"} · ${device}${size}`;
+    badge.textContent = `${badgeLook[1]} · ${device}${size}`;
 
     const actions = document.createElement("div");
     actions.className = "dp-actions";
 
-    const toggleBtn = document.createElement("button");
-    toggleBtn.type = "button";
-    toggleBtn.className = "dp-btn dp-btn-surface";
-    toggleBtn.textContent = done ? "重開" : "完成";
-    toggleBtn.addEventListener("click", () => toggleStatus(item));
+    const makeButton = (label, onClick) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "dp-btn dp-btn-surface";
+      btn.textContent = label;
+      btn.addEventListener("click", onClick);
+      return btn;
+    };
 
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "dp-btn dp-btn-surface";
-    delBtn.textContent = "刪除";
-    delBtn.addEventListener("click", () => deleteItem(item.id));
-
-    actions.append(toggleBtn, delBtn);
+    if (status === "done") {
+      actions.append(makeButton("重開", () => setItemStatus(item, "open")));
+    } else {
+      actions.append(makeButton("完成", () => setItemStatus(item, "done")));
+    }
+    if (status === "processing") {
+      // For when the agent never got to it: put it back so the next send includes it.
+      actions.append(makeButton("退回", () => setItemStatus(item, "open")));
+    }
+    actions.append(makeButton("刪除", () => deleteItem(item.id)));
     top.append(badge, actions);
 
     const meta = document.createElement("div");

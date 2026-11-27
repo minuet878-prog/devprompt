@@ -4,6 +4,8 @@ import path from "node:path";
 
 const MAX_PROMPT_LENGTH = 2000;
 const MAX_FIELD_LENGTH = 500;
+// open → processing once sent to an agent, so a later send skips it → done.
+export const STATUSES = ["open", "processing", "done"];
 
 export function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -96,8 +98,8 @@ export class PromptStore {
   }
 
   updateStatus(id, status, resolution = "") {
-    if (status !== "open" && status !== "done") {
-      throw new Error("狀態只能是 open 或 done");
+    if (!STATUSES.includes(status)) {
+      throw new Error("狀態只能是 open、processing 或 done");
     }
     const items = this.load();
     let updated = null;
@@ -118,6 +120,23 @@ export class PromptStore {
     }
     this.save(items);
     return updated;
+  }
+
+  // Moves the given items to `status`, but only those currently in one of `from`.
+  setStatusMany(ids, status, from = STATUSES) {
+    const wanted = new Set(ids);
+    const items = this.load();
+    let count = 0;
+    for (const item of items) {
+      if (wanted.has(item.id) && from.includes(item.status || "open")) {
+        item.status = status;
+        count += 1;
+      }
+    }
+    if (count > 0) {
+      this.save(items);
+    }
+    return count;
   }
 
   markDone(idOrAll, resolution = "") {
@@ -168,8 +187,9 @@ export function formatMarkdown(items) {
             : "";
         const targetText = item.text ? `「${item.text}」` : "";
         const attrs = item.attributes ? `\n   - 屬性：\`${item.attributes}\`` : "";
+        const processing = item.status === "processing" ? " · 處理中" : "";
         return [
-          `${idx + 1}. **${item.url || "/"}**（${device}${size ? ` ${size}` : ""}） \`#${item.id}\``,
+          `${idx + 1}. **${item.url || "/"}**（${device}${size ? ` ${size}` : ""}${processing}） \`#${item.id}\``,
           `   - 元件：\`${item.selector || `<${item.tag || "element"}>`}\` ${targetText}`.trimEnd() +
             attrs,
           `   - 需求：${item.prompt}`,

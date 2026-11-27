@@ -348,7 +348,47 @@ describe("dev-prompt proxy and store", () => {
 
     const status = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/status/`).then((r) => r.json());
     assert.equal(status.job.status, "handed_off");
-    assert.equal(store.load()[0].status, "open");
+    assert.equal(store.load()[0].status, "processing");
+    store.clear();
+  });
+
+  test("a sent item moves to processing and is left out of the next send", async () => {
+    const first = store.add({ url: "/", viewport: { width: 1280, height: 800 }, prompt: "改標題" });
+
+    const firstWait = fetch(`${proxyUrl}/__dev-prompt__/wait/`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 30));
+    await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, { method: "POST" });
+    assert.deepEqual((await firstWait).item_ids, [first.id]);
+    assert.equal(store.load()[0].status, "processing");
+
+    const preview = await fetch(`${proxyUrl}/__dev-prompt__/prompt-preview/`).then((r) => r.json());
+    assert.equal(preview.open_count, 0);
+    const emptySend = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, { method: "POST" });
+    assert.equal(emptySend.status, 400);
+
+    const second = store.add({ url: "/", viewport: { width: 1280, height: 800 }, prompt: "改按鈕" });
+    const secondWait = fetch(`${proxyUrl}/__dev-prompt__/wait/`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 30));
+    await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, { method: "POST" });
+    const received = await secondWait;
+    assert.deepEqual(received.item_ids, [second.id]);
+    assert.doesNotMatch(received.prompt, /改標題/);
+
+    assert.equal(store.markDone("all"), 2);
+    store.clear();
+  });
+
+  test("a queued send that gets replaced keeps the items it was holding", async () => {
+    const first = store.add({ url: "/", viewport: { width: 1280, height: 800 }, prompt: "改標題" });
+    await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, { method: "POST" });
+    const second = store.add({ url: "/", viewport: { width: 1280, height: 800 }, prompt: "改按鈕" });
+    const res = await fetch(`${proxyUrl}/__dev-prompt__/dispatch/`, { method: "POST" });
+    assert.equal((await res.json()).job.status, "queued");
+
+    const received = await fetch(`${proxyUrl}/__dev-prompt__/wait/`).then((r) => r.json());
+    assert.deepEqual(received.item_ids, [first.id, second.id]);
+    assert.match(received.prompt, /改標題/);
+    assert.match(received.prompt, /改按鈕/);
     store.clear();
   });
 });

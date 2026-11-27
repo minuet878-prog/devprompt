@@ -13,13 +13,14 @@
 - **自動整理成工程 Prompt**：依頁面分組，自動附上裝置與螢幕寬度（手機／電腦）、CSS 選擇器、元件文字、屬性、畫面座標與專案規範提醒。
 - **自動銜接正在對話的 Agent 或背景 Agent**：
   1. 若有對話正在執行 `dev-prompt wait`，送出後**直接喚醒原本那個對話**（保留完整上下文！）。Claude Code、Codex、Antigravity 都可以。
-  2. 若沒有對話在等，預設（`auto`）**先排隊**，不會自己開別的 Agent；你開著的對話一跑 `dev-prompt wait` 就會馬上收到。之後再送會換成最新的一批（已經包含所有未處理標註）。
+  2. 若沒有對話在等，預設（`auto`）**先排隊**，不會自己開別的 Agent；你開著的對話一跑 `dev-prompt wait` 就會馬上收到。排隊中再送，新標註會併進同一批一起送。
   3. 要背景 Agent 自動改，才用 `--agent` 指名：
      - `antigravity-app`：在 Antigravity App 環境裡直接建立新對話並開始執行（從 Antigravity App 啟動時 `auto` 也會選它）。
      - `agy`：透過 Antigravity CLI（`agy -p --mode accept-edits`）在背景修改。
      - `claude`：透過 Claude Code CLI（`claude -p --permission-mode acceptEdits`）在背景修改。
      - 自訂指令：任何 CLI（例如 `codex`）都能從標準輸入接收整理好的 Prompt。
-  - 背景 Agent 結束時**沒有印出任何結果**，標註會保持未處理並顯示失敗：`agy -p` 遇到它沒權限跑的指令時會直接停下、什麼都不印，這不代表有改好。
+  - **送出後移到「處理中」**：送出的標註不會再被下一次送出重複帶上，可以邊等 Agent 改邊繼續標新的。Agent 跑完 `dev-prompt done all` 後會自動移到「已完成」；Agent 沒處理到的，按卡片上的「退回」放回待處理。
+  - 背景 Agent 結束時**沒有印出任何結果**，標註會退回未處理並顯示失敗：`agy -p` 遇到它沒權限跑的指令時會直接停下、什麼都不印，這不代表有改好。
 
 ---
 
